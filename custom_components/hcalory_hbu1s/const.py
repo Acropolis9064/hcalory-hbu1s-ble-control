@@ -60,3 +60,4 @@ DEFAULT_TEMP = 16
 DISCONNECT_DELAY = 120
 RETRY_COUNT = 3
 RETRY_DELAY = 1.0
+POLL_INTERVAL = 5  # Seconds between status polls to keep connection alive
