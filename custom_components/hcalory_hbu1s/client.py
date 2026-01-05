@@ -148,21 +148,21 @@ class HcaloryBleClient:
     def _parse_status(self, data: bytearray) -> None:
         """Parse status notification from heater.
         
-        Packet format (from captured data):
+        Packet format (43 bytes total):
         Bytes 0-6: Header (00010001000100 or 00030001000100)
         Byte 7: Message type (0x23 for status)
         Bytes 8-9: Unknown (0300)
-        Byte 10: Target temperature when OFF (0x1e = 30°C)
+        Byte 10: Stored target temperature (0x1e = 30°C)
         Bytes 11-12: ffff
         Bytes 13-14: 01f4 (500)
-        Bytes 15-18: 00000000 when off, non-zero when running
-        Byte 19: Running indicator (0x00=off, 0x83/0x42=running/transitioning)
-        Byte 20: Power level or mode
-        Byte 21: Target temp when running
-        Byte 22: Always 0x02?
-        Bytes 23-24: Body temperature (008c = 140)
+        Bytes 15-20: 000000000000 when off, varies when running
+        Byte 21: Running indicator (0x00=off, 0x81/0x83/0x42=running/transitioning)
+        Byte 22: Power level (01)
+        Byte 23: Current target temp when running (0x0f=15, 0x11=17, etc)
+        Byte 24: Always 0x02
+        Bytes 25-26: Body temperature area
         """
-        if len(data) < 25:
+        if len(data) < 27:
             _LOGGER.debug("Status packet too short: %d bytes", len(data))
             return
         
@@ -173,25 +173,23 @@ class HcaloryBleClient:
             # Check for status message type (0x23 at byte 7)
             if len(data) > 7 and data[7] == 0x23:
                 
-                # Byte 19 indicates running state
-                # 0x00 = off, 0x83 = running, 0x42 = transitioning
-                running_byte = data[19] if len(data) > 19 else 0
+                # Byte 21 indicates running state
+                # 0x00 = off, 0x81/0x83 = running, 0x42 = transitioning
+                running_byte = data[21]
                 old_state = self._status.state
                 
                 if running_byte == 0x00:
                     self._status.state = 0  # Off
                     # Target temp at byte 10 when off
-                    if len(data) > 10:
-                        target_temp = data[10]
-                        if 8 <= target_temp <= 36:
-                            self._status.target_temp = target_temp
+                    target_temp = data[10]
+                    if 8 <= target_temp <= 36:
+                        self._status.target_temp = target_temp
                 else:
                     self._status.state = 2  # Running
-                    # Target temp at byte 21 when running
-                    if len(data) > 21:
-                        target_temp = data[21]
-                        if 8 <= target_temp <= 36:
-                            self._status.target_temp = target_temp
+                    # Target temp at byte 23 when running
+                    target_temp = data[23]
+                    if 8 <= target_temp <= 36:
+                        self._status.target_temp = target_temp
                 
                 if old_state != self._status.state:
                     _LOGGER.info("Heater state changed: %d -> %d (running_byte=0x%02x)", 
@@ -200,9 +198,9 @@ class HcaloryBleClient:
                 _LOGGER.debug("Parsed: running_byte=0x%02x, state=%d, target=%d°C", 
                              running_byte, self._status.state, self._status.target_temp)
                 
-                # Body temperature at bytes 23-24 (little endian)
-                if len(data) > 24:
-                    body_temp = data[23] + (data[24] << 8)
+                # Body temperature at bytes 25-26 (little endian)
+                if len(data) > 26:
+                    body_temp = data[25] + (data[26] << 8)
                     if 0 < body_temp < 500:
                         self._status.body_temp = body_temp
                         _LOGGER.debug("Parsed body temp: %d°C", body_temp)
