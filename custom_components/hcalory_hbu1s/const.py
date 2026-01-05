@@ -10,6 +10,10 @@ NOTIFY_CHAR_UUID = "0000bdf5-0000-1000-8000-00805f9b34fb"
 # Protocol wrapper - all commands start with this
 PROTOCOL_HEADER = bytes([0x00, 0x02, 0x00, 0x01, 0x00, 0x01, 0x00])
 
+# Init command - must be sent after connecting to wake up heater
+# This is the full command including header
+CMD_INIT = bytes.fromhex("000200010001000a0c000005010000000012")
+
 # Command types
 CMD_TYPE_POWER = 0x0e  # Power on/off
 CMD_TYPE_TEMP = 0x07   # Set temperature (while running)
