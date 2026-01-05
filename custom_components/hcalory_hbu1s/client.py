@@ -152,11 +152,11 @@ class HcaloryBleClient:
         Bytes 0-6: Header (00010001000100)
         Byte 7: Message type (0x23 for status)
         Bytes 8-10: 030000
-        Byte 11: Stored target temperature (0x1e = 30°C)
+        Byte 11: Stored target temperature (not used - unreliable when off)
         Bytes 12-19: ffff01f400000000
         Byte 20: Running indicator (0x00=off, 0x80/0x81/0x83=running, 0x42=transitioning)
         Byte 21: Power level (01)
-        Byte 22: Current target temp (0x0f=15°C)
+        Byte 22: Current target temp (0x0f=15°C) - only valid when running
         Byte 23: Always 0x02
         Bytes 24+: Body temp and other data
         """
@@ -178,17 +178,11 @@ class HcaloryBleClient:
                 
                 if running_byte == 0x00:
                     self._status.state = 0  # Off/Standby
+                    # Don't update target_temp - keep last known value
                 else:
                     self._status.state = 2  # Running (any non-zero value)
-                
-                # Target temp at byte 22 when running, byte 11 when off
-                if self._status.state == 2:
-                    target_temp = data[22]
-                else:
-                    target_temp = data[11]
-                
-                if 8 <= target_temp <= 36:
-                    self._status.target_temp = target_temp
+                    # Only update temp from byte 22 when running
+                    self._status.target_temp = data[22]
                 
                 if old_state != self._status.state:
                     _LOGGER.info("Heater state changed: %d -> %d (running_byte=0x%02x)", 
@@ -196,12 +190,6 @@ class HcaloryBleClient:
                 
                 _LOGGER.debug("Parsed: running_byte=0x%02x, state=%d, target=%d°C", 
                              running_byte, self._status.state, self._status.target_temp)
-                
-                # Body temperature - need to find correct position
-                # For now just log the raw bytes around expected position
-                if len(data) > 28:
-                    _LOGGER.debug("Body temp area bytes 25-28: %02x %02x %02x %02x", 
-                                 data[25], data[26], data[27], data[28])
             
         except Exception as err:
             _LOGGER.warning("Error parsing status: %s", err)
@@ -239,9 +227,15 @@ class HcaloryBleClient:
             return False
     
     async def turn_on(self) -> bool:
-        """Turn the heater on."""
-        _LOGGER.info("Turning heater ON")
-        return await self._send_command(CMD_POWER_ON)
+        """Turn the heater on using current target temperature."""
+        _LOGGER.info("Turning heater ON at %d°C", self._status.target_temp)
+        
+        # Build power on command with current target temp
+        # Format: 0e 04 00 00 09 00 00 00 00 00 00 00 00 02 [temp]
+        temp = self._status.target_temp
+        command = bytes([0x0e, 0x04, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, temp])
+        
+        return await self._send_command(command)
     
     async def turn_off(self) -> bool:
         """Turn the heater off."""
