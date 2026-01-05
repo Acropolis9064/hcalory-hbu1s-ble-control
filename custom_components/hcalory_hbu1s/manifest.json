@@ -7,7 +7,7 @@
   "documentation": "https://github.com/your-repo/hcalory_hbu1s",
   "iot_class": "local_push",
   "requirements": ["bleak>=0.21.0"],
-  "version": "0.2.0",
+  "version": "0.2.1",
   "bluetooth": [
     {
       "local_name": "Heater*",
