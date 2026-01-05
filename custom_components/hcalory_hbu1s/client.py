@@ -147,19 +147,55 @@ class HcaloryBleClient:
     
     def _parse_status(self, data: bytearray) -> None:
         """Parse status notification from heater."""
-        # Status packets contain heater state info
-        # Format varies but we look for key bytes
         if len(data) < 10:
+            _LOGGER.debug("Status packet too short: %d bytes", len(data))
             return
         
         try:
-            # Look for state information in the packet
-            # This may need adjustment based on actual packet format
             hex_data = data.hex()
-            _LOGGER.debug("Parsing status: %s", hex_data)
+            _LOGGER.debug("Parsing status: %s (len=%d)", hex_data, len(data))
             
-            # Extract what we can from the notification
-            # Actual byte positions may need tuning
+            # The heater sends status in response to queries
+            # Based on captured data, format appears to be:
+            # Byte 4: Target temperature
+            # We need to find the state byte - look for patterns
+            
+            # Check if this looks like a status response (starts with certain bytes)
+            if len(data) >= 20:
+                # Try to extract target temp - usually in first 10 bytes
+                # From captures: byte 4 often has target temp
+                potential_temp = data[4] if len(data) > 4 else 0
+                if 8 <= potential_temp <= 36:
+                    self._status.target_temp = potential_temp
+                    _LOGGER.debug("Parsed target temp: %d", potential_temp)
+                
+                # Look for state indicator
+                # In running state, there's usually a non-zero indicator
+                # Check various positions for state byte
+                # From HCI logs, state might be around byte 17 or indicated by packet type
+                
+                # Check for running indicators in the data
+                # When heater is running, certain bytes are non-zero
+                if len(data) >= 18:
+                    # Byte 17 might indicate state (0=off, 2=running based on captures)
+                    state_byte = data[17] if len(data) > 17 else 0
+                    
+                    # Also check for other patterns
+                    # Look for "02" pattern that might indicate running
+                    if state_byte == 2 or b'\x02' in data[15:20]:
+                        self._status.state = 2  # Running
+                        _LOGGER.debug("Parsed state: RUNNING (state_byte=%d)", state_byte)
+                    elif state_byte == 0:
+                        self._status.state = 0  # Off
+                        _LOGGER.debug("Parsed state: OFF (state_byte=%d)", state_byte)
+                
+                # Try to get body temp (usually a larger number, 2 bytes)
+                if len(data) >= 20:
+                    # Body temp might be at bytes 18-19 (little endian)
+                    body_temp = data[18] + (data[19] << 8) if len(data) > 19 else 0
+                    if 0 < body_temp < 500:  # Reasonable range for body temp
+                        self._status.body_temp = body_temp
+                        _LOGGER.debug("Parsed body temp: %d", body_temp)
             
         except Exception as err:
             _LOGGER.warning("Error parsing status: %s", err)
