@@ -14,6 +14,9 @@ PROTOCOL_HEADER = bytes([0x00, 0x02, 0x00, 0x01, 0x00, 0x01, 0x00])
 # This is the full command including header
 CMD_INIT = bytes.fromhex("000200010001000a0c000005010000000012")
 
+# Status query command - sent periodically to keep connection alive and get status
+CMD_STATUS_QUERY = bytes.fromhex("000200010001000e040000090000000000000000000d")
+
 # Command types
 CMD_TYPE_POWER = 0x0e  # Power on/off
 CMD_TYPE_TEMP = 0x07   # Set temperature (while running)
