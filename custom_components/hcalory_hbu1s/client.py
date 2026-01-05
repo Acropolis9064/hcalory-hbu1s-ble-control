@@ -19,6 +19,7 @@ from .const import (
     CMD_POWER_OFF,
     CMD_TEMP_INNER_PREFIX,
     CMD_INIT,
+    CMD_STATUS_QUERY,
     HeaterState,
     MIN_TEMP,
     MAX_TEMP,
@@ -231,17 +232,17 @@ class HcaloryBleClient:
 
     async def request_status(self) -> bool:
         """Send status request to keep connection alive and get current state."""
-        # Send the init/status command
+        # Send the status query command (different from init)
         try:
             if not self.is_connected:
                 return False
             
             await self._client.write_gatt_char(
                 WRITE_CHAR_UUID,
-                CMD_INIT,
+                CMD_STATUS_QUERY,
                 response=False,
             )
-            _LOGGER.debug("Status request sent")
+            _LOGGER.debug("Status query sent")
             return True
         except BleakError as err:
             _LOGGER.warning("Status request failed: %s", err)
