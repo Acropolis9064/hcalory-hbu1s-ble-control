@@ -228,3 +228,21 @@ class HcaloryBleClient:
             self._status.target_temp = temp
         
         return success
+
+    async def request_status(self) -> bool:
+        """Send status request to keep connection alive and get current state."""
+        # Send the init/status command
+        try:
+            if not self.is_connected:
+                return False
+            
+            await self._client.write_gatt_char(
+                WRITE_CHAR_UUID,
+                CMD_INIT,
+                response=False,
+            )
+            _LOGGER.debug("Status request sent")
+            return True
+        except BleakError as err:
+            _LOGGER.warning("Status request failed: %s", err)
+            return False
