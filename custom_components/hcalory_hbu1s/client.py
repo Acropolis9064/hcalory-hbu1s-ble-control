@@ -179,9 +179,12 @@ class HcaloryBleClient:
                 if running_byte == 0x00:
                     self._status.state = 0  # Off/Standby
                     # Don't update target_temp - keep last known value
+                elif running_byte == 0x42:
+                    self._status.state = 1  # Transitioning/Shutting down
+                    # Don't update target_temp - keep last known value
                 else:
-                    self._status.state = 2  # Running (any non-zero value)
-                    # Only update temp from byte 22 when running
+                    self._status.state = 2  # Running (0x80, 0x81, 0x83)
+                    # Only update temp from byte 22 when properly running
                     self._status.target_temp = data[22]
                 
                 if old_state != self._status.state:
