@@ -18,6 +18,7 @@ from .const import (
     CMD_POWER_ON,
     CMD_POWER_OFF,
     CMD_TEMP_INNER_PREFIX,
+    CMD_INIT,
     HeaterState,
     MIN_TEMP,
     MAX_TEMP,
@@ -97,6 +98,17 @@ class HcaloryBleClient:
                     NOTIFY_CHAR_UUID,
                     self._on_notification,
                 )
+                
+                # Send init command to wake up heater
+                _LOGGER.debug("Sending init command to heater")
+                await self._client.write_gatt_char(
+                    WRITE_CHAR_UUID,
+                    CMD_INIT,
+                    response=False,
+                )
+                
+                # Give heater time to respond
+                await asyncio.sleep(0.5)
                 
                 self._status.connected = True
                 _LOGGER.info("Connected to heater: %s", self._ble_device.address)
