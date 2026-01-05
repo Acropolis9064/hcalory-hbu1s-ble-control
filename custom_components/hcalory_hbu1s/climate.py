@@ -39,7 +39,11 @@ class HcaloryClimate(ClimateEntity):
     _attr_name = None
     _attr_temperature_unit = UnitOfTemperature.CELSIUS
     _attr_hvac_modes = [HVACMode.OFF, HVACMode.HEAT]
-    _attr_supported_features = ClimateEntityFeature.TARGET_TEMPERATURE
+    _attr_supported_features = (
+        ClimateEntityFeature.TARGET_TEMPERATURE
+        | ClimateEntityFeature.TURN_ON
+        | ClimateEntityFeature.TURN_OFF
+    )
     _attr_min_temp = MIN_TEMP
     _attr_max_temp = MAX_TEMP
     _attr_target_temperature_step = 1
@@ -102,6 +106,7 @@ class HcaloryClimate(ClimateEntity):
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         """Set HVAC mode."""
+        _LOGGER.info("Setting HVAC mode to: %s", hvac_mode)
         if hvac_mode == HVACMode.HEAT:
             await self._client.turn_on()
         elif hvac_mode == HVACMode.OFF:
@@ -110,12 +115,15 @@ class HcaloryClimate(ClimateEntity):
     async def async_set_temperature(self, **kwargs: Any) -> None:
         """Set target temperature."""
         if (temp := kwargs.get(ATTR_TEMPERATURE)) is not None:
+            _LOGGER.info("Setting temperature to: %s", temp)
             await self._client.set_temperature(int(temp))
 
     async def async_turn_on(self) -> None:
         """Turn on the heater."""
+        _LOGGER.info("Turn ON called")
         await self._client.turn_on()
 
     async def async_turn_off(self) -> None:
         """Turn off the heater."""
+        _LOGGER.info("Turn OFF called")
         await self._client.turn_off()
