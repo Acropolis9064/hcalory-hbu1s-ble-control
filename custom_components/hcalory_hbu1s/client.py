@@ -241,8 +241,8 @@ class HcaloryBleClient:
         if not success:
             return False
         
-        # Give heater time to start
-        await asyncio.sleep(0.5)
+        # Wait 2 seconds for heater to process the ON command
+        await asyncio.sleep(2.0)
         
         # Switch to thermostat mode: 07 0b 00 00 02 02 00 0f
         _LOGGER.info("Switching to thermostat mode")
