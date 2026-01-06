@@ -230,13 +230,12 @@ class HcaloryBleClient:
             return False
     
     async def turn_on(self) -> bool:
-        """Turn the heater on using current target temperature."""
-        _LOGGER.info("Turning heater ON at %d°C", self._status.target_temp)
+        """Turn the heater on."""
+        _LOGGER.info("Turning heater ON")
         
-        # Build power on command with current target temp
-        # Format: 0e 04 00 00 09 00 00 00 00 00 00 00 00 02 [temp]
-        temp = self._status.target_temp
-        command = bytes([0x0e, 0x04, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, temp])
+        # Power ON command: 0e 04 00 00 09 00 00 00 00 00 00 00 00 02 0f
+        # Last byte is checksum: action (0x02) + 0x0d = 0x0f
+        command = bytes([0x0e, 0x04, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x0f])
         
         return await self._send_command(command)
     
