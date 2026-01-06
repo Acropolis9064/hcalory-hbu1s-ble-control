@@ -172,18 +172,18 @@ class HcaloryBleClient:
             if len(data) > 7 and data[7] == 0x23:
                 
                 # Byte 20 indicates running state
-                # 0x00 = off/standby, 0x80/0x81/0x83 = running, 0x42 = transitioning
+                # 0x00 = off/standby, 0x80/0x81/0x83=gear, 0x85=temp, 0x42/0x43=transitioning
                 running_byte = data[20]
                 old_state = self._status.state
                 
                 if running_byte == 0x00:
                     self._status.state = 0  # Off/Standby
                     # Don't update target_temp - keep last known value
-                elif running_byte == 0x42:
+                elif running_byte in (0x42, 0x43, 0x44, 0x45):
                     self._status.state = 1  # Transitioning/Shutting down
                     # Don't update target_temp - keep last known value
                 else:
-                    self._status.state = 2  # Running (0x80, 0x81, 0x83)
+                    self._status.state = 2  # Running (0x80, 0x81, 0x83, 0x85, 0x87)
                     # Only update temp from byte 22 when properly running
                     self._status.target_temp = data[22]
                 
@@ -230,14 +230,25 @@ class HcaloryBleClient:
             return False
     
     async def turn_on(self) -> bool:
-        """Turn the heater on."""
+        """Turn the heater on in thermostat mode."""
         _LOGGER.info("Turning heater ON")
         
         # Power ON command: 0e 04 00 00 09 00 00 00 00 00 00 00 00 02 0f
         # Last byte is checksum: action (0x02) + 0x0d = 0x0f
-        command = bytes([0x0e, 0x04, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x0f])
+        on_command = bytes([0x0e, 0x04, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x0f])
         
-        return await self._send_command(command)
+        success = await self._send_command(on_command)
+        if not success:
+            return False
+        
+        # Give heater time to start
+        await asyncio.sleep(0.5)
+        
+        # Switch to thermostat mode: 07 0b 00 00 02 02 00 0f
+        _LOGGER.info("Switching to thermostat mode")
+        mode_command = bytes([0x07, 0x0b, 0x00, 0x00, 0x02, 0x02, 0x00, 0x0f])
+        
+        return await self._send_command(mode_command)
     
     async def turn_off(self) -> bool:
         """Turn the heater off."""
@@ -245,20 +256,18 @@ class HcaloryBleClient:
         return await self._send_command(CMD_POWER_OFF)
     
     async def set_temperature(self, temp: int) -> bool:
-        """Set target temperature (works while running).
+        """Set target temperature (works while running in thermostat mode).
         
         Args:
             temp: Target temperature in Celsius (8-36)
         """
         temp = max(MIN_TEMP, min(MAX_TEMP, temp))
         
-        # Build temperature command
-        # Inner: 06 00 00 02 [TEMP] 00 [CHECKSUM]
-        inner = CMD_TEMP_INNER_PREFIX + bytes([temp, 0x00])
-        checksum = sum(inner) & 0xFF
-        
-        # Full inner command with length byte
-        command = bytes([0x07]) + inner + bytes([checksum])
+        # Temperature command: 07 06 00 00 02 [temp] 00 [checksum]
+        # Checksum = sum of bytes 1-6
+        payload = bytes([0x06, 0x00, 0x00, 0x02, temp, 0x00])
+        checksum = sum(payload) & 0xFF
+        command = bytes([0x07]) + payload + bytes([checksum])
         
         _LOGGER.info("Setting temperature to %d°C", temp)
         
