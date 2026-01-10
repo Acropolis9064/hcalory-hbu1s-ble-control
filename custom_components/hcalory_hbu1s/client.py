@@ -191,8 +191,12 @@ class HcaloryBleClient:
                     _LOGGER.info("Heater state changed: %d -> %d (running_byte=0x%02x)", 
                                 old_state, self._status.state, running_byte)
                 
-                _LOGGER.debug("Parsed: running_byte=0x%02x, state=%d, target=%d°C", 
-                             running_byte, self._status.state, self._status.target_temp)
+                # Byte 28: Ambient temperature (stored as tenths, e.g. 84 = 8.4°C)
+                if len(data) > 28:
+                    self._status.ambient_temp = data[28]
+                
+                _LOGGER.debug("Parsed: running_byte=0x%02x, state=%d, target=%d°C, ambient=%d", 
+                             running_byte, self._status.state, self._status.target_temp, self._status.ambient_temp)
             
         except Exception as err:
             _LOGGER.warning("Error parsing status: %s", err)
