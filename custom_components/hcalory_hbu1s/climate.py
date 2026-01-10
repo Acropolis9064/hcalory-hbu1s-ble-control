@@ -88,7 +88,7 @@ class HcaloryClimate(ClimateEntity):
     def current_temperature(self) -> float | None:
         """Return the current ambient temperature."""
         temp = self._client.status.ambient_temp
-        return temp if temp > 0 else None
+        return temp / 10 if temp > 0 else None
 
     @property
     def target_temperature(self) -> float | None:
