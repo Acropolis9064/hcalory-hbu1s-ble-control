@@ -113,6 +113,8 @@ class HcaloryBleClient:
         self._connect_lock = asyncio.Lock()
         self._operation_lock = asyncio.Lock()
         self._status_event = asyncio.Event()
+        # Target for a turn-on in progress; None when no turn-on is running
+        self._turn_on_target: int | None = None
 
     @property
     def is_connected(self) -> bool:
@@ -311,15 +313,31 @@ class HcaloryBleClient:
         on, wait until it reports it is on, switch to temperature mode if
         needed, then send the target temperature.
 
+        Powering on takes several seconds, and HomeKit and voice assistants
+        often send "heat" and "18°C" as two separate calls a moment apart. A
+        target set while the turn-on is in progress replaces this one, so the
+        target is only read just before it is sent.
+
         Args:
             target_temp: Target in °C; defaults to the last known target.
         """
-        target = max(MIN_TEMP, min(MAX_TEMP, target_temp or self._status.target_temp))
-        _LOGGER.info("Turning heater ON (target %d°C)", target)
+        self._turn_on_target = max(MIN_TEMP, min(MAX_TEMP, target_temp or self._status.target_temp))
+        _LOGGER.info("Turning heater ON (target %d°C)", self._turn_on_target)
 
-        if not await self._power_on():
-            return False
-        return await self._apply_temperature_mode(target)
+        try:
+            if not await self._power_on():
+                return False
+            if not await self._switch_mode(MODE_TEMPERATURE):
+                return False
+            # Repeat if a new target arrived while the last one was being sent
+            while True:
+                target = self._turn_on_target
+                if not await self._apply_temperature_mode(target):
+                    return False
+                if self._turn_on_target == target:
+                    return True
+        finally:
+            self._turn_on_target = None
 
     async def turn_on_gear(self) -> bool:
         """Turn the heater on in gear (fixed output level) mode.
@@ -366,11 +384,16 @@ class HcaloryBleClient:
         """Set the target temperature in °C.
 
         If the heater is on it is switched to temperature mode (if it was in
-        gear mode) and given the new target. If it is off, the target is kept
-        and applied the next time it is turned on.
+        gear mode) and given the new target. If it is being turned on, the
+        turn-on uses this target instead. If it is off, the target is kept and
+        applied the next time it is turned on.
         """
         target = max(MIN_TEMP, min(MAX_TEMP, temp))
         _LOGGER.info("Setting target temperature to %d°C", target)
+        if self._turn_on_target is not None:
+            self._turn_on_target = target
+            self._status.target_temp = target
+            return True
         if not self._status.is_on:
             self._status.target_temp = target
             return True
