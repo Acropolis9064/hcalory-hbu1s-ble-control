@@ -106,3 +106,4 @@ DISCONNECT_DELAY = 120
 RETRY_COUNT = 3
 RETRY_DELAY = 1.0
 POLL_INTERVAL = 5  # Seconds between status polls to keep connection alive
+RECONNECT_INTERVAL = 30  # Seconds to wait after a failed reconnect before trying again

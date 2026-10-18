@@ -6,9 +6,12 @@ import logging
 from dataclasses import dataclass, field
 from typing import Callable
 
-from bleak import BleakClient
 from bleak.backends.device import BLEDevice
 from bleak.exc import BleakError
+from bleak_retry_connector import (
+    BleakClientWithServiceCache,
+    establish_connection,
+)
 
 from .const import (
     ACTION_MODE_TEMPERATURE,
@@ -92,10 +95,17 @@ class HcaloryBleClient:
         self,
         ble_device: BLEDevice,
         status_callback: Callable[[HeaterStatus], None] | None = None,
+        ble_device_callback: Callable[[], BLEDevice | None] | None = None,
     ) -> None:
-        """Initialize the client."""
+        """Initialize the client.
+
+        ble_device_callback should return the freshest BLEDevice Home Assistant
+        knows about, so each (re)connect can go through whichever Bluetooth
+        adapter or proxy currently has the best signal and a free slot.
+        """
         self._ble_device = ble_device
-        self._client: BleakClient | None = None
+        self._ble_device_callback = ble_device_callback
+        self._client: BleakClientWithServiceCache | None = None
         self._status = HeaterStatus()
         self._status_callback = status_callback
         self._connect_lock = asyncio.Lock()
@@ -106,68 +116,76 @@ class HcaloryBleClient:
     def is_connected(self) -> bool:
         """Return True if connected to heater."""
         return self._client is not None and self._client.is_connected
-    
+
     @property
     def status(self) -> HeaterStatus:
         """Return current heater status."""
         return self._status
-    
+
     def set_ble_device(self, ble_device: BLEDevice) -> None:
         """Update the BLE device reference."""
         self._ble_device = ble_device
-    
+
+    def _latest_ble_device(self) -> BLEDevice:
+        """Return the most recent BLEDevice for the heater."""
+        if self._ble_device_callback and (device := self._ble_device_callback()):
+            self._ble_device = device
+        return self._ble_device
+
     async def connect(self) -> bool:
-        """Connect to the heater."""
+        """Connect to the heater (only ever one connection at a time)."""
         async with self._connect_lock:
             if self.is_connected:
                 return True
-            
+
+            # Drop any half-open previous connection before making a new one
+            await self._close_client()
+
+            device = self._latest_ble_device()
             try:
-                self._client = BleakClient(
-                    self._ble_device,
+                client = await establish_connection(
+                    BleakClientWithServiceCache,
+                    device,
+                    device.name or device.address,
                     disconnected_callback=self._on_disconnect,
+                    max_attempts=3,
+                    ble_device_callback=self._latest_ble_device,
                 )
-                await self._client.connect()
-                
-                # Subscribe to notifications
-                await self._client.start_notify(
-                    NOTIFY_CHAR_UUID,
-                    self._on_notification,
-                )
-                
-                # Send init command to wake up heater
+                self._client = client
+                await client.start_notify(NOTIFY_CHAR_UUID, self._on_notification)
+
+                # Init command wakes the heater up and starts status updates
                 _LOGGER.debug("Sending init command to heater")
-                await self._client.write_gatt_char(
-                    WRITE_CHAR_UUID,
-                    CMD_INIT,
-                    response=False,
-                )
-                
-                # Give heater time to respond
+                await client.write_gatt_char(WRITE_CHAR_UUID, CMD_INIT, response=False)
                 await asyncio.sleep(0.5)
-                
-                self._status.connected = True
-                _LOGGER.info("Connected to heater: %s", self._ble_device.address)
-                return True
-                
-            except BleakError as err:
-                _LOGGER.error("Failed to connect: %s", err)
-                self._status.connected = False
+            except (BleakError, asyncio.TimeoutError) as err:
+                _LOGGER.warning("Could not connect to heater: %s", err)
+                await self._close_client()
                 return False
-    
+
+            self._status.connected = True
+            _LOGGER.info("Connected to heater %s", device.address)
+            return True
+
     async def disconnect(self) -> None:
         """Disconnect from the heater."""
-        if self._client:
+        async with self._connect_lock:
+            await self._close_client()
+
+    async def _close_client(self) -> None:
+        """Disconnect and forget the current client, if any."""
+        client, self._client = self._client, None
+        self._status.connected = False
+        if client is not None:
             try:
-                await self._client.disconnect()
+                await client.disconnect()
             except BleakError as err:
-                _LOGGER.warning("Error during disconnect: %s", err)
-            finally:
-                self._client = None
-                self._status.connected = False
-    
-    def _on_disconnect(self, client: BleakClient) -> None:
-        """Handle disconnection."""
+                _LOGGER.debug("Error during disconnect: %s", err)
+
+    def _on_disconnect(self, client: BleakClientWithServiceCache) -> None:
+        """Handle the heater dropping the connection."""
+        if self._client is not None and client is not self._client:
+            return  # an older connection we already replaced
         _LOGGER.info("Heater disconnected")
         self._status.connected = False
         if self._status_callback:
