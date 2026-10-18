@@ -35,24 +35,45 @@ CMD_TEMP_INNER_PREFIX = bytes([0x06, 0x00, 0x00, 0x02])
 # Status response header
 STATUS_HEADER = bytes([0x00, 0x01, 0x00, 0x01])
 
-# Heater states (from notification data)
+# Status notification layout (43 bytes, message type 0x23 at byte 7).
+# Mapped from Android HCI captures of the official app; see README.
+STATUS_MSG_TYPE = 0x23
+STATUS_MIN_LENGTH = 43
+STATUS_IDX_MSG_TYPE = 7
+STATUS_IDX_RUN_STATE = 20        # 0x00 standby, 0x8x on, 0x4x cooling down
+STATUS_IDX_MODE = 21             # 0x01 temperature (thermostat), 0x02 gear (fixed level)
+STATUS_IDX_SETPOINT = 22         # target temperature (display units) or gear level
+STATUS_IDX_AUTO_START_STOP = 23  # 0x01 on, 0x02 off
+STATUS_IDX_VOLTAGE = 24          # 2 bytes big-endian, tenths of a volt
+STATUS_IDX_BODY_TEMP = 27        # 2 bytes big-endian signed, tenths of a degree (display units)
+STATUS_IDX_AMBIENT_TEMP = 30     # 2 bytes big-endian signed, tenths of a degree (display units)
+STATUS_IDX_UNIT = 37             # 0x01 Fahrenheit, 0x00 Celsius
+
+MODE_TEMPERATURE = 0x01
+MODE_GEAR = 0x02
+
+
 class HeaterState:
-    OFF = 0x00
-    STARTING = 0x01
-    PREHEATING = 0x02
-    RUNNING = 0x03
-    SHUTDOWN = 0x04
+    """Heater run state, decoded from status byte 20."""
+
+    OFF = "off"
+    STARTING = "starting"
+    RUNNING = "running"
+    COOLING_DOWN = "cooling_down"
 
     @classmethod
-    def to_string(cls, state: int) -> str:
-        mapping = {
-            cls.OFF: "off",
-            cls.STARTING: "starting",
-            cls.PREHEATING: "preheating",
-            cls.RUNNING: "running",
-            cls.SHUTDOWN: "shutting_down",
-        }
-        return mapping.get(state, f"unknown_{state:02x}")
+    def from_byte(cls, value: int) -> str:
+        """Map the raw run-state byte to a state.
+
+        Seen in captures: 0x80 -> 0x81 -> 0x83 while igniting and warming up,
+        0x85 (briefly 0x87) once burning, 0x45 -> 0x43 -> 0x41 -> 0x42 while
+        the fan cools the heater down after switch-off, and 0x00 in standby.
+        """
+        if value & 0x80:
+            return cls.RUNNING if value in (0x85, 0x87) else cls.STARTING
+        if value & 0x40:
+            return cls.COOLING_DOWN
+        return cls.OFF
 
 # Temperature limits
 MIN_TEMP = 8

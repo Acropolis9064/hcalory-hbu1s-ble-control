@@ -20,35 +20,66 @@ from .const import (
     CMD_TEMP_INNER_PREFIX,
     CMD_INIT,
     CMD_STATUS_QUERY,
+    DEFAULT_TEMP,
     HeaterState,
     MIN_TEMP,
     MAX_TEMP,
+    MODE_GEAR,
+    MODE_TEMPERATURE,
     RETRY_COUNT,
     RETRY_DELAY,
+    STATUS_IDX_AMBIENT_TEMP,
+    STATUS_IDX_AUTO_START_STOP,
+    STATUS_IDX_BODY_TEMP,
+    STATUS_IDX_MODE,
+    STATUS_IDX_MSG_TYPE,
+    STATUS_IDX_RUN_STATE,
+    STATUS_IDX_SETPOINT,
+    STATUS_IDX_UNIT,
+    STATUS_IDX_VOLTAGE,
+    STATUS_MIN_LENGTH,
+    STATUS_MSG_TYPE,
 )
 
 _LOGGER = logging.getLogger(__name__)
 
 
+def _tenths_to_celsius(raw: int, fahrenheit: bool) -> float:
+    """Convert a tenths-of-a-degree reading in the heater's display units to °C."""
+    value = raw / 10
+    if fahrenheit:
+        value = (value - 32) * 5 / 9
+    return round(value, 1)
+
+
 @dataclass
 class HeaterStatus:
-    """Represents the current heater status."""
-    
-    state: int = HeaterState.OFF
-    target_temp: int = 16
-    body_temp: int = 0
-    ambient_temp: int = 0
+    """Represents the current heater status.
+
+    Temperatures are always in °C here, whatever units the heater displays.
+    """
+
+    state: str = HeaterState.OFF
+    run_byte: int = 0
+    mode: int | None = None  # MODE_TEMPERATURE or MODE_GEAR (only reported while on)
+    setpoint: int | None = None  # raw: target in display units, or gear level
+    fahrenheit: bool = False  # heater display units
+    auto_start_stop: bool | None = None
+    voltage: float | None = None
+    body_temp: float | None = None
+    ambient_temp: float | None = None
+    target_temp: int = DEFAULT_TEMP  # °C, last reported or requested
     connected: bool = False
-    
+
     @property
     def is_on(self) -> bool:
-        """Return True if heater is on."""
-        return self.state not in (HeaterState.OFF, HeaterState.SHUTDOWN)
-    
+        """Return True if the heater is starting or running."""
+        return self.state in (HeaterState.STARTING, HeaterState.RUNNING)
+
     @property
-    def state_string(self) -> str:
-        """Return human-readable state."""
-        return HeaterState.to_string(self.state)
+    def gear_level(self) -> int | None:
+        """Return the gear level while running in gear mode."""
+        return self.setpoint if self.mode == MODE_GEAR else None
 
 
 class HcaloryBleClient:
@@ -146,60 +177,60 @@ class HcaloryBleClient:
             self._status_callback(self._status)
     
     def _parse_status(self, data: bytearray) -> None:
-        """Parse status notification from heater.
-        
-        Packet format (43 bytes total) - properly mapped:
-        Bytes 0-6: Header (00010001000100)
-        Byte 7: Message type (0x23 for status)
-        Bytes 8-10: 030000
-        Byte 11: Stored target temperature (not used - unreliable when off)
-        Bytes 12-19: ffff01f400000000
-        Byte 20: Running indicator (0x00=off, 0x80/0x81/0x83=running, 0x42=transitioning)
-        Byte 21: Power level (01)
-        Byte 22: Current target temp (0x0f=15°C) - only valid when running
-        Byte 23: Always 0x02
-        Bytes 24+: Body temp and other data
+        """Parse a status notification from the heater.
+
+        43-byte packet, message type 0x23 at byte 7. Field positions are in
+        const.py (STATUS_IDX_*) and documented in the README. Temperatures are
+        tenths of a degree in the heater's display units (byte 37 says which)
+        and are converted to °C here. Mode and setpoint are only reported
+        while the heater is on (they read 0 in standby).
         """
-        if len(data) < 25:
-            _LOGGER.debug("Status packet too short: %d bytes", len(data))
+        if len(data) < STATUS_MIN_LENGTH or data[STATUS_IDX_MSG_TYPE] != STATUS_MSG_TYPE:
+            _LOGGER.debug("Ignoring non-status packet: %s", data.hex())
             return
-        
-        try:
-            hex_data = data.hex()
-            _LOGGER.debug("Parsing status: %s (len=%d)", hex_data, len(data))
-            
-            # Check for status message type (0x23 at byte 7)
-            if len(data) > 7 and data[7] == 0x23:
-                
-                # Byte 20 indicates running state
-                # 0x00 = off/standby, 0x80/0x81/0x83=gear, 0x85=temp, 0x42/0x43=transitioning
-                running_byte = data[20]
-                old_state = self._status.state
-                
-                if running_byte == 0x00:
-                    self._status.state = 0  # Off/Standby
-                    # Don't update target_temp - keep last known value
-                elif running_byte in (0x42, 0x43, 0x44, 0x45):
-                    self._status.state = 1  # Transitioning/Shutting down
-                    # Don't update target_temp - keep last known value
-                else:
-                    self._status.state = 2  # Running (0x80, 0x81, 0x83, 0x85, 0x87)
-                    # Only update temp from byte 22 when properly running
-                    self._status.target_temp = data[22]
-                
-                if old_state != self._status.state:
-                    _LOGGER.info("Heater state changed: %d -> %d (running_byte=0x%02x)", 
-                                old_state, self._status.state, running_byte)
-                
-                # Byte 28: Ambient temperature (stored as tenths, e.g. 84 = 8.4°C)
-                if len(data) > 28:
-                    self._status.ambient_temp = data[28]
-                
-                _LOGGER.debug("Parsed: running_byte=0x%02x, state=%d, target=%d°C, ambient=%d", 
-                             running_byte, self._status.state, self._status.target_temp, self._status.ambient_temp)
-            
-        except Exception as err:
-            _LOGGER.warning("Error parsing status: %s", err)
+
+        status = self._status
+        old_state = status.state
+
+        status.run_byte = data[STATUS_IDX_RUN_STATE]
+        status.state = HeaterState.from_byte(status.run_byte)
+        status.fahrenheit = data[STATUS_IDX_UNIT] == 0x01
+        status.auto_start_stop = data[STATUS_IDX_AUTO_START_STOP] == 0x01
+        status.voltage = int.from_bytes(data[STATUS_IDX_VOLTAGE:STATUS_IDX_VOLTAGE + 2], "big") / 10
+        status.body_temp = _tenths_to_celsius(
+            int.from_bytes(data[STATUS_IDX_BODY_TEMP:STATUS_IDX_BODY_TEMP + 2], "big", signed=True),
+            status.fahrenheit,
+        )
+        status.ambient_temp = _tenths_to_celsius(
+            int.from_bytes(data[STATUS_IDX_AMBIENT_TEMP:STATUS_IDX_AMBIENT_TEMP + 2], "big", signed=True),
+            status.fahrenheit,
+        )
+
+        if status.is_on:
+            status.mode = data[STATUS_IDX_MODE]
+            status.setpoint = data[STATUS_IDX_SETPOINT]
+            if status.mode == MODE_TEMPERATURE and status.setpoint:
+                target = status.setpoint
+                if status.fahrenheit:
+                    target = round((target - 32) * 5 / 9)
+                status.target_temp = max(MIN_TEMP, min(MAX_TEMP, target))
+        else:
+            status.mode = None
+            status.setpoint = None
+
+        if old_state != status.state:
+            _LOGGER.info("Heater state: %s -> %s (0x%02x)", old_state, status.state, status.run_byte)
+
+        _LOGGER.debug(
+            "Status: state=%s mode=%s setpoint=%s unit=%s ambient=%s°C body=%s°C voltage=%sV",
+            status.state,
+            status.mode,
+            status.setpoint,
+            "F" if status.fahrenheit else "C",
+            status.ambient_temp,
+            status.body_temp,
+            status.voltage,
+        )
     
     async def _send_command(self, command: bytes) -> bool:
         """Send a command to the heater."""

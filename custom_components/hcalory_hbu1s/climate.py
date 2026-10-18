@@ -7,6 +7,7 @@ from typing import Any
 from homeassistant.components.climate import (
     ClimateEntity,
     ClimateEntityFeature,
+    HVACAction,
     HVACMode,
 )
 from homeassistant.config_entries import ConfigEntry
@@ -15,8 +16,10 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.device_registry import DeviceInfo
 
-from .const import DOMAIN, MIN_TEMP, MAX_TEMP
+from .const import DOMAIN, MIN_TEMP, MAX_TEMP, MODE_GEAR, MODE_TEMPERATURE, HeaterState
 from .client import HcaloryBleClient, HeaterStatus
+
+MODE_NAMES = {MODE_TEMPERATURE: "temperature", MODE_GEAR: "gear"}
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -85,23 +88,38 @@ class HcaloryClimate(ClimateEntity):
         return HVACMode.OFF
 
     @property
+    def hvac_action(self) -> HVACAction:
+        """Return what the heater is doing right now."""
+        state = self._client.status.state
+        if state in (HeaterState.STARTING, HeaterState.RUNNING):
+            return HVACAction.HEATING
+        if state == HeaterState.COOLING_DOWN:
+            return HVACAction.FAN
+        return HVACAction.OFF
+
+    @property
     def current_temperature(self) -> float | None:
-        """Return the current ambient temperature."""
-        temp = self._client.status.ambient_temp
-        return temp / 10 if temp > 0 else None
+        """Return the ambient temperature reported by the heater, in °C."""
+        return self._client.status.ambient_temp
 
     @property
     def target_temperature(self) -> float | None:
-        """Return the target temperature."""
+        """Return the target temperature in °C."""
         return self._client.status.target_temp
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return extra state attributes."""
+        status = self._client.status
         return {
-            "state": self._client.status.state_string,
-            "body_temperature": self._client.status.body_temp,
-            "connected": self._client.status.connected,
+            "state": status.state,
+            "mode": MODE_NAMES.get(status.mode) if status.mode is not None else None,
+            "gear_level": status.gear_level,
+            "body_temperature": status.body_temp,
+            "supply_voltage": status.voltage,
+            "auto_start_stop": status.auto_start_stop,
+            "display_units": "°F" if status.fahrenheit else "°C",
+            "connected": status.connected,
         }
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
