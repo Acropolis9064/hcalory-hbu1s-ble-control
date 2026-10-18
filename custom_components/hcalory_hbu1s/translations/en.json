@@ -17,5 +17,19 @@
             "already_configured": "Device is already configured",
             "no_devices_found": "No Hcalory heaters found"
         }
+    },
+    "entity": {
+        "climate": {
+            "heater": {
+                "state_attributes": {
+                    "preset_mode": {
+                        "state": {
+                            "temperature": "Temperature",
+                            "gear": "Gear (fixed level)"
+                        }
+                    }
+                }
+            }
+        }
     }
 }

@@ -20,7 +20,9 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from .const import DOMAIN, MIN_TEMP, MAX_TEMP, MODE_GEAR, MODE_TEMPERATURE, HeaterState
 from .client import HcaloryBleClient, HeaterStatus
 
-MODE_NAMES = {MODE_TEMPERATURE: "temperature", MODE_GEAR: "gear"}
+PRESET_TEMPERATURE = "temperature"
+PRESET_GEAR = "gear"
+MODE_NAMES = {MODE_TEMPERATURE: PRESET_TEMPERATURE, MODE_GEAR: PRESET_GEAR}
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -41,10 +43,13 @@ class HcaloryClimate(ClimateEntity):
 
     _attr_has_entity_name = True
     _attr_name = None
+    _attr_translation_key = "heater"
     _attr_temperature_unit = UnitOfTemperature.CELSIUS
     _attr_hvac_modes = [HVACMode.OFF, HVACMode.HEAT]
+    _attr_preset_modes = [PRESET_TEMPERATURE, PRESET_GEAR]
     _attr_supported_features = (
         ClimateEntityFeature.TARGET_TEMPERATURE
+        | ClimateEntityFeature.PRESET_MODE
         | ClimateEntityFeature.TURN_ON
         | ClimateEntityFeature.TURN_OFF
     )
@@ -97,6 +102,26 @@ class HcaloryClimate(ClimateEntity):
         if state == HeaterState.COOLING_DOWN:
             return HVACAction.FAN
         return HVACAction.OFF
+
+    @property
+    def preset_mode(self) -> str | None:
+        """Return the heater mode: temperature (thermostat) or gear (fixed level).
+
+        While off this is the mode it was last running in, which is the mode
+        it will resume in if simply powered on.
+        """
+        status = self._client.status
+        mode = status.mode if status.is_on else status.last_mode
+        return MODE_NAMES.get(mode)
+
+    async def async_set_preset_mode(self, preset_mode: str) -> None:
+        """Turn the heater on in the chosen mode."""
+        _LOGGER.info("Setting preset mode to: %s", preset_mode)
+        if preset_mode == PRESET_GEAR:
+            await self._client.turn_on_gear()
+        else:
+            await self._client.turn_on()
+        self.async_write_ha_state()
 
     @property
     def current_temperature(self) -> float | None:

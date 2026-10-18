@@ -14,6 +14,7 @@ from bleak_retry_connector import (
 )
 
 from .const import (
+    ACTION_MODE_GEAR,
     ACTION_MODE_TEMPERATURE,
     ACTION_POWER_OFF,
     ACTION_POWER_ON,
@@ -68,6 +69,7 @@ class HeaterStatus:
     state: str = HeaterState.OFF
     run_byte: int = 0
     mode: int | None = None  # MODE_TEMPERATURE or MODE_GEAR (only reported while on)
+    last_mode: int | None = None  # mode last seen while on; the heater resumes in it
     setpoint: int | None = None  # raw: target in display units, or gear level
     fahrenheit: bool = False  # heater display units
     auto_start_stop: bool | None = None
@@ -246,6 +248,8 @@ class HcaloryBleClient:
 
         if status.is_on:
             status.mode = data[STATUS_IDX_MODE]
+            if status.mode in (MODE_TEMPERATURE, MODE_GEAR):
+                status.last_mode = status.mode
             status.setpoint = data[STATUS_IDX_SETPOINT]
             if status.mode == MODE_TEMPERATURE and status.setpoint:
                 target = status.setpoint
@@ -313,14 +317,45 @@ class HcaloryBleClient:
         target = max(MIN_TEMP, min(MAX_TEMP, target_temp or self._status.target_temp))
         _LOGGER.info("Turning heater ON (target %d°C)", target)
 
-        if not self._status.is_on:
-            if not await self._send_command(action_command(ACTION_POWER_ON)):
-                return False
-            if not await self._wait_for(lambda: self._status.is_on, CONFIRM_TIMEOUT):
-                _LOGGER.warning("Heater did not report that it turned on")
-                return False
-
+        if not await self._power_on():
+            return False
         return await self._apply_temperature_mode(target)
+
+    async def turn_on_gear(self) -> bool:
+        """Turn the heater on in gear (fixed output level) mode.
+
+        It runs at the gear level it was last set to.
+        """
+        _LOGGER.info("Turning heater ON in gear mode")
+        if not await self._power_on():
+            return False
+        return await self._switch_mode(MODE_GEAR)
+
+    async def _power_on(self) -> bool:
+        """Power the heater on (if needed) and wait until it reports it is on."""
+        if self._status.is_on:
+            return True
+        if not await self._send_command(action_command(ACTION_POWER_ON)):
+            return False
+        if not await self._wait_for(lambda: self._status.is_on, CONFIRM_TIMEOUT):
+            _LOGGER.warning("Heater did not report that it turned on")
+            return False
+        return True
+
+    async def _switch_mode(self, mode: int) -> bool:
+        """Switch a running heater to MODE_TEMPERATURE or MODE_GEAR and confirm."""
+        status = self._status
+        if status.mode == mode:
+            return True
+        action = ACTION_MODE_GEAR if mode == MODE_GEAR else ACTION_MODE_TEMPERATURE
+        _LOGGER.info("Switching heater to %s mode", "gear" if mode == MODE_GEAR else "temperature")
+        for _ in range(2):
+            if not await self._send_command(action_command(action)):
+                return False
+            if await self._wait_for(lambda: status.mode == mode, CONFIRM_TIMEOUT):
+                return True
+        _LOGGER.warning("Heater did not confirm the mode change")
+        return False
 
     async def turn_off(self) -> bool:
         """Turn the heater off (it then runs its fan to cool down)."""
@@ -344,16 +379,8 @@ class HcaloryBleClient:
     async def _apply_temperature_mode(self, target: int) -> bool:
         """Make sure a running heater is in temperature mode at target °C."""
         status = self._status
-        if status.mode != MODE_TEMPERATURE:
-            _LOGGER.info("Switching heater to temperature mode")
-            for _ in range(2):
-                if not await self._send_command(action_command(ACTION_MODE_TEMPERATURE)):
-                    return False
-                if await self._wait_for(lambda: status.mode == MODE_TEMPERATURE, CONFIRM_TIMEOUT):
-                    break
-            else:
-                _LOGGER.warning("Heater did not switch to temperature mode")
-                return False
+        if not await self._switch_mode(MODE_TEMPERATURE):
+            return False
 
         # The set-temperature command uses the heater's display units
         value = round(target * 9 / 5 + 32) if status.fahrenheit else target
