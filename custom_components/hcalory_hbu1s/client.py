@@ -11,13 +11,11 @@ from bleak.backends.device import BLEDevice
 from bleak.exc import BleakError
 
 from .const import (
-    SERVICE_UUID,
+    ACTION_MODE_TEMPERATURE,
+    ACTION_POWER_OFF,
+    ACTION_POWER_ON,
     WRITE_CHAR_UUID,
     NOTIFY_CHAR_UUID,
-    PROTOCOL_HEADER,
-    CMD_POWER_ON,
-    CMD_POWER_OFF,
-    CMD_TEMP_INNER_PREFIX,
     CMD_INIT,
     CMD_STATUS_QUERY,
     DEFAULT_TEMP,
@@ -39,7 +37,12 @@ from .const import (
     STATUS_IDX_VOLTAGE,
     STATUS_MIN_LENGTH,
     STATUS_MSG_TYPE,
+    action_command,
+    set_temperature_command,
 )
+
+# How long to wait for the heater to confirm a change in its status updates
+CONFIRM_TIMEOUT = 10.0
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -97,7 +100,8 @@ class HcaloryBleClient:
         self._status_callback = status_callback
         self._connect_lock = asyncio.Lock()
         self._operation_lock = asyncio.Lock()
-    
+        self._status_event = asyncio.Event()
+
     @property
     def is_connected(self) -> bool:
         """Return True if connected to heater."""
@@ -173,8 +177,24 @@ class HcaloryBleClient:
         """Handle incoming notification data."""
         _LOGGER.debug("Notification received: %s", data.hex())
         self._parse_status(data)
+        self._status_event.set()
         if self._status_callback:
             self._status_callback(self._status)
+
+    async def _wait_for(self, condition: Callable[[], bool], timeout: float) -> bool:
+        """Wait until the heater's status updates satisfy condition."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while not condition():
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return False
+            self._status_event.clear()
+            try:
+                await asyncio.wait_for(self._status_event.wait(), remaining)
+            except asyncio.TimeoutError:
+                return condition()
+        return True
     
     def _parse_status(self, data: bytearray) -> None:
         """Parse a status notification from the heater.
@@ -233,22 +253,19 @@ class HcaloryBleClient:
         )
     
     async def _send_command(self, command: bytes) -> bool:
-        """Send a command to the heater."""
+        """Send a full command (built with const.build_command) to the heater."""
         async with self._operation_lock:
             for attempt in range(RETRY_COUNT):
                 try:
                     if not self.is_connected:
                         if not await self.connect():
                             continue
-                    
-                    # Build full command with protocol header
-                    full_command = PROTOCOL_HEADER + command
-                    
-                    _LOGGER.debug("Sending command: %s", full_command.hex())
-                    
+
+                    _LOGGER.debug("Sending command: %s", command.hex())
+
                     await self._client.write_gatt_char(
                         WRITE_CHAR_UUID,
-                        full_command,
+                        command,
                         response=False,
                     )
                     return True
@@ -264,53 +281,69 @@ class HcaloryBleClient:
             
             return False
     
-    async def turn_on(self) -> bool:
-        """Turn the heater on in thermostat mode."""
-        _LOGGER.info("Turning heater ON")
-        
-        # Power ON command: 0e 04 00 00 09 00 00 00 00 00 00 00 00 02 0f
-        # Last byte is checksum: action (0x02) + 0x0d = 0x0f
-        on_command = bytes([0x0e, 0x04, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x0f])
-        
-        success = await self._send_command(on_command)
-        if not success:
-            return False
-        
-        # Wait 2 seconds for heater to process the ON command
-        await asyncio.sleep(2.0)
-        
-        # Switch to thermostat mode: 07 0b 00 00 02 02 00 0f
-        _LOGGER.info("Switching to thermostat mode")
-        mode_command = bytes([0x07, 0x0b, 0x00, 0x00, 0x02, 0x02, 0x00, 0x0f])
-        
-        return await self._send_command(mode_command)
-    
-    async def turn_off(self) -> bool:
-        """Turn the heater off."""
-        _LOGGER.info("Turning heater OFF")
-        return await self._send_command(CMD_POWER_OFF)
-    
-    async def set_temperature(self, temp: int) -> bool:
-        """Set target temperature (works while running in thermostat mode).
-        
+    async def turn_on(self, target_temp: int | None = None) -> bool:
+        """Turn the heater on in temperature (thermostat) mode.
+
+        The heater powers on in whichever mode it was last used in (gear or
+        temperature) and only accepts a mode change while it is on. So: power
+        on, wait until it reports it is on, switch to temperature mode if
+        needed, then send the target temperature.
+
         Args:
-            temp: Target temperature in Celsius (8-36)
+            target_temp: Target in °C; defaults to the last known target.
         """
-        temp = max(MIN_TEMP, min(MAX_TEMP, temp))
-        
-        # Temperature command: 07 06 00 00 02 [temp] 00 [checksum]
-        # Checksum = sum of bytes 1-6
-        payload = bytes([0x06, 0x00, 0x00, 0x02, temp, 0x00])
-        checksum = sum(payload) & 0xFF
-        command = bytes([0x07]) + payload + bytes([checksum])
-        
-        _LOGGER.info("Setting temperature to %d°C", temp)
-        
-        success = await self._send_command(command)
-        if success:
-            self._status.target_temp = temp
-        
-        return success
+        target = max(MIN_TEMP, min(MAX_TEMP, target_temp or self._status.target_temp))
+        _LOGGER.info("Turning heater ON (target %d°C)", target)
+
+        if not self._status.is_on:
+            if not await self._send_command(action_command(ACTION_POWER_ON)):
+                return False
+            if not await self._wait_for(lambda: self._status.is_on, CONFIRM_TIMEOUT):
+                _LOGGER.warning("Heater did not report that it turned on")
+                return False
+
+        return await self._apply_temperature_mode(target)
+
+    async def turn_off(self) -> bool:
+        """Turn the heater off (it then runs its fan to cool down)."""
+        _LOGGER.info("Turning heater OFF")
+        return await self._send_command(action_command(ACTION_POWER_OFF))
+
+    async def set_temperature(self, temp: int) -> bool:
+        """Set the target temperature in °C.
+
+        If the heater is on it is switched to temperature mode (if it was in
+        gear mode) and given the new target. If it is off, the target is kept
+        and applied the next time it is turned on.
+        """
+        target = max(MIN_TEMP, min(MAX_TEMP, temp))
+        _LOGGER.info("Setting target temperature to %d°C", target)
+        if not self._status.is_on:
+            self._status.target_temp = target
+            return True
+        return await self._apply_temperature_mode(target)
+
+    async def _apply_temperature_mode(self, target: int) -> bool:
+        """Make sure a running heater is in temperature mode at target °C."""
+        status = self._status
+        if status.mode != MODE_TEMPERATURE:
+            _LOGGER.info("Switching heater to temperature mode")
+            for _ in range(2):
+                if not await self._send_command(action_command(ACTION_MODE_TEMPERATURE)):
+                    return False
+                if await self._wait_for(lambda: status.mode == MODE_TEMPERATURE, CONFIRM_TIMEOUT):
+                    break
+            else:
+                _LOGGER.warning("Heater did not switch to temperature mode")
+                return False
+
+        # The set-temperature command uses the heater's display units
+        value = round(target * 9 / 5 + 32) if status.fahrenheit else target
+        if status.setpoint != value:
+            if not await self._send_command(set_temperature_command(value, status.fahrenheit)):
+                return False
+        status.target_temp = target
+        return True
 
     async def request_status(self) -> bool:
         """Send status request to keep connection alive and get current state."""

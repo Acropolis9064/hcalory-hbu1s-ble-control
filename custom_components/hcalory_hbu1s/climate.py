@@ -5,6 +5,7 @@ import logging
 from typing import Any
 
 from homeassistant.components.climate import (
+    ATTR_HVAC_MODE,
     ClimateEntity,
     ClimateEntityFeature,
     HVACAction,
@@ -131,10 +132,22 @@ class HcaloryClimate(ClimateEntity):
             await self._client.turn_off()
 
     async def async_set_temperature(self, **kwargs: Any) -> None:
-        """Set target temperature."""
-        if (temp := kwargs.get(ATTR_TEMPERATURE)) is not None:
-            _LOGGER.info("Setting temperature to: %s", temp)
-            await self._client.set_temperature(int(temp))
+        """Set target temperature, optionally with an HVAC mode in the same call.
+
+        Voice assistants and HomeKit often send "heat to 18°C" as one call,
+        so a HEAT mode here turns the heater on straight at that target.
+        """
+        temp = kwargs.get(ATTR_TEMPERATURE)
+        target = round(temp) if temp is not None else None
+        hvac_mode = kwargs.get(ATTR_HVAC_MODE)
+        _LOGGER.info("Set temperature called: %s (hvac_mode %s)", target, hvac_mode)
+        if hvac_mode == HVACMode.OFF:
+            await self._client.turn_off()
+        elif hvac_mode == HVACMode.HEAT:
+            await self._client.turn_on(target)
+        elif target is not None:
+            await self._client.set_temperature(target)
+        self.async_write_ha_state()
 
     async def async_turn_on(self) -> None:
         """Turn on the heater."""
