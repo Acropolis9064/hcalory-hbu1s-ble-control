@@ -1,22 +1,25 @@
 {
   "domain": "hcalory_hbu1s",
   "name": "Hcalory HBU1S Diesel Heater",
-  "codeowners": [],
+  "codeowners": [
+    "@Acropolis9064"
+  ],
   "config_flow": true,
   "dependencies": [
     "bluetooth_adapters"
   ],
-  "documentation": "https://github.com/your-repo/hcalory_hbu1s",
+  "documentation": "https://github.com/Acropolis9064/hcalory-hbu1s-ble-control",
   "iot_class": "local_push",
   "requirements": [
     "bleak>=0.21.0",
     "bleak-retry-connector>=3.0.0"
   ],
-  "version": "0.2.2",
+  "version": "0.3.0",
   "bluetooth": [
     {
       "local_name": "Heater*",
       "service_uuid": "0000bd39-0000-1000-8000-00805f9b34fb"
     }
-  ]
+  ],
+  "issue_tracker": "https://github.com/Acropolis9064/hcalory-hbu1s-ble-control/issues"
 }
