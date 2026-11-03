@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -30,6 +31,7 @@ from .const import (
     MODE_TEMPERATURE,
     RETRY_COUNT,
     RETRY_DELAY,
+    STALE_TIMEOUT,
     STATUS_IDX_AMBIENT_TEMP,
     STATUS_IDX_AUTO_START_STOP,
     STATUS_IDX_BODY_TEMP,
@@ -115,11 +117,22 @@ class HcaloryBleClient:
         self._status_event = asyncio.Event()
         # Target for a turn-on in progress; None when no turn-on is running
         self._turn_on_target: int | None = None
+        # time.monotonic() of the last status update (or of connecting)
+        self._last_status = 0.0
 
     @property
     def is_connected(self) -> bool:
         """Return True if connected to heater."""
         return self._client is not None and self._client.is_connected
+
+    @property
+    def is_stale(self) -> bool:
+        """Return True if connected but the heater has gone quiet.
+
+        The link can die without BlueZ reporting a disconnect: the client still
+        looks connected but every write fails with "Not connected".
+        """
+        return self.is_connected and time.monotonic() - self._last_status > STALE_TIMEOUT
 
     @property
     def status(self) -> HeaterStatus:
@@ -168,6 +181,7 @@ class HcaloryBleClient:
                 return False
 
             self._status.connected = True
+            self._last_status = time.monotonic()
             _LOGGER.info("Connected to heater %s", device.address)
             return True
 
@@ -175,6 +189,16 @@ class HcaloryBleClient:
         """Disconnect from the heater."""
         async with self._connect_lock:
             await self._close_client()
+
+    async def drop_connection(self, reason: str) -> None:
+        """Treat the link as lost: close it so the next poll or command reconnects.
+
+        The entity shows unavailable until it does.
+        """
+        _LOGGER.warning("Heater link lost (%s), reconnecting", reason)
+        await self.disconnect()
+        if self._status_callback:
+            self._status_callback(self._status)
 
     async def _close_client(self) -> None:
         """Disconnect and forget the current client, if any."""
@@ -198,6 +222,7 @@ class HcaloryBleClient:
     def _on_notification(self, sender: int, data: bytearray) -> None:
         """Handle incoming notification data."""
         _LOGGER.debug("Notification received: %s", data.hex())
+        self._last_status = time.monotonic()
         self._parse_status(data)
         self._status_event.set()
         if self._status_callback:
@@ -301,6 +326,8 @@ class HcaloryBleClient:
                         RETRY_COUNT,
                         err,
                     )
+                    # Reconnect on the next attempt rather than reusing a dead link
+                    await self.drop_connection("command failed")
                     await asyncio.sleep(RETRY_DELAY)
             
             return False
@@ -429,4 +456,5 @@ class HcaloryBleClient:
             return True
         except BleakError as err:
             _LOGGER.warning("Status request failed: %s", err)
+            await self.drop_connection("status request failed")
             return False

@@ -13,7 +13,7 @@ from homeassistant.const import CONF_ADDRESS, Platform
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryNotReady
 
-from .const import DOMAIN, POLL_INTERVAL, RECONNECT_INTERVAL
+from .const import DOMAIN, POLL_INTERVAL, RECONNECT_INTERVAL, STALE_TIMEOUT
 from .client import HcaloryBleClient
 
 _LOGGER = logging.getLogger(__name__)
@@ -45,13 +45,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         raise ConfigEntryNotReady(f"Could not connect to Hcalory heater {address}")
 
     async def poll_status() -> None:
-        """Poll status to keep the connection alive; reconnect if it drops."""
+        """Poll status to keep the connection alive; reconnect if it drops or goes quiet."""
         loop = asyncio.get_running_loop()
         next_reconnect = 0.0
         while True:
             await asyncio.sleep(POLL_INTERVAL)
             try:
-                if client.is_connected:
+                if client.is_stale:
+                    await client.drop_connection(f"no status for {STALE_TIMEOUT} s")
+                elif client.is_connected:
                     await client.request_status()
                 elif loop.time() >= next_reconnect:
                     _LOGGER.debug("Not connected, attempting reconnect")
