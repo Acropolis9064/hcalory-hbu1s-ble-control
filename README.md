@@ -8,6 +8,7 @@ A Home Assistant custom integration for controlling Hcalory HBU1S 5KW diesel hea
 - **Temperature mode** - thermostat control with a target temperature (8-36°C); turning on always lands in temperature mode at the requested target, even if the heater was last used in gear mode
 - **Gear mode** - choose the "Gear" preset to run at a fixed output level (the heater's last-used level)
 - **Room temperature** - the heater's own ambient reading, in °C whatever units the heater displays
+- **Auto start/stop** - a switch that sets whether the heater may stop and restart itself in temperature mode; the heater is kept at the switch's setting, so a change at the heater's panel or in the app is undone within seconds
 - **Heater status** - starting / running / cooling down (shown as heating / fan in Home Assistant), plus body temperature, supply voltage, auto start/stop and display units as attributes
 - **Voice assistants and HomeKit** - "set the heater to 18 degrees" turns it on at 18°C in one go
 - **Bluetooth auto-discovery** - discovers heaters advertising as "Heater*"
@@ -48,6 +49,18 @@ The heater appears as a climate entity:
 
 While the heater is off, the preset shows the mode it will resume in.
 
+### Auto start/stop
+
+With auto start/stop on, the heater in temperature mode stops by itself once the room is warm enough and **starts again by itself** when it cools, even though it looks off (standby) in the meantime. With it off, the heater only starts when told to.
+
+The **Auto start/stop** switch holds the setting you want (off unless you turn it on; remembered across restarts). The integration compares it with what the heater reports on every status poll (every 5 s) and after each command, and corrects the heater when they differ, so a change made at the heater's panel or in the app is put back within seconds:
+
+- **Running:** sends the auto start/stop toggle.
+- **Standby, auto start/stop on but the switch off:** sends power off, which clears it (the heater ignores the toggle in standby).
+- **Standby, switch on:** nothing can turn auto start/stop on in standby, so it is set the next time the heater runs. Powering off clears it, so with the switch on it is set again on each run.
+
+It never acts while the heater is starting or cooling down or while another command is in progress, and waits at least 30 s between attempts so it never toggles twice by mistake.
+
 ## Supported Devices
 
 - Hcalory HBU1S 5KW Diesel Heater (Bluetooth only models)
@@ -75,9 +88,9 @@ Every command is `00 02 00 01 00 01 00` + `[length]` + `[body]` + `[checksum]`, 
 | Action | Code | Notes |
 |---|---|---|
 | Status query | `00` | Also keeps the connection alive |
-| Power off | `01` | Heater then cools down with the fan running |
+| Power off | `01` | Heater then cools down with the fan running. Also clears auto start/stop (sent in standby, status byte 23 went `01` → `02`) |
 | Power on | `02` | Heater resumes in the mode it was last used in |
-| Auto start/stop | `05` | Toggles |
+| Auto start/stop | `05` | Toggles (no separate on/off codes known). Only accepted while the heater is on |
 | Temperature mode | `06` | Only accepted while the heater is on |
 | Gear mode | `07` | Only accepted while the heater is on |
 
@@ -112,9 +125,8 @@ The app also sends the current time (`0a 00 00 05 [hh] [mm] [ss] 07 00` every fe
 
 1. **Sub-zero ambient** - the ambient value is treated as a signed number; this hasn't been confirmed with a real reading below 0°C yet
 2. **Gear level** - gear mode runs at the heater's last-used level; the level can't be changed from Home Assistant yet
-3. **Auto start/stop** - shown as an attribute but not controllable yet
-4. **Single connection** - the heater accepts one Bluetooth connection and stops advertising while connected. Close the Hcalory app (or disable the integration) to use the app, and vice versa
-5. **Range** - the heater must be within Bluetooth range of a Home Assistant adapter or Bluetooth proxy
+3. **Single connection** - the heater accepts one Bluetooth connection and stops advertising while connected. Close the Hcalory app (or disable the integration) to use the app, and vice versa
+4. **Range** - the heater must be within Bluetooth range of a Home Assistant adapter or Bluetooth proxy
 
 ## Troubleshooting
 

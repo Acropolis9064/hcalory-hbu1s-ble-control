@@ -30,6 +30,11 @@
                     }
                 }
             }
+        },
+        "switch": {
+            "auto_start_stop": {
+                "name": "Auto start/stop"
+            }
         }
     }
 }

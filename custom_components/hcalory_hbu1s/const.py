@@ -108,3 +108,6 @@ RETRY_DELAY = 1.0
 POLL_INTERVAL = 5  # Seconds between status polls to keep connection alive
 RECONNECT_INTERVAL = 30  # Seconds to wait after a failed reconnect before trying again
 STALE_TIMEOUT = 30  # Seconds without a status update before the link counts as lost (the heater sends one about every second)
+# Minimum seconds between auto start/stop toggles. The command toggles rather
+# than sets, so it must never be resent before the last one has had time to show.
+AUTO_START_STOP_RETRY = 30

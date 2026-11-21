@@ -18,7 +18,7 @@ from .client import HcaloryBleClient
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS: list[Platform] = [Platform.CLIMATE]
+PLATFORMS: list[Platform] = [Platform.CLIMATE, Platform.SWITCH]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -55,6 +55,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     await client.drop_connection(f"no status for {STALE_TIMEOUT} s")
                 elif client.is_connected:
                     await client.request_status()
+                    await client.sync_auto_start_stop()
                 elif loop.time() >= next_reconnect:
                     _LOGGER.debug("Not connected, attempting reconnect")
                     if not await client.connect():

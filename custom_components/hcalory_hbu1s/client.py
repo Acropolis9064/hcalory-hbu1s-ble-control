@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -15,10 +16,12 @@ from bleak_retry_connector import (
 )
 
 from .const import (
+    ACTION_AUTO_START_STOP_TOGGLE,
     ACTION_MODE_GEAR,
     ACTION_MODE_TEMPERATURE,
     ACTION_POWER_OFF,
     ACTION_POWER_ON,
+    AUTO_START_STOP_RETRY,
     WRITE_CHAR_UUID,
     NOTIFY_CHAR_UUID,
     CMD_INIT,
@@ -119,6 +122,13 @@ class HcaloryBleClient:
         self._turn_on_target: int | None = None
         # time.monotonic() of the last status update (or of connecting)
         self._last_status = 0.0
+        # Number of commands (turn on/off, set temperature) in progress
+        self._busy = 0
+        # Auto start/stop setting the heater should have; None = leave it alone
+        self._wanted_auto_start_stop: bool | None = None
+        self._auto_lock = asyncio.Lock()
+        self._last_auto_toggle = -float(AUTO_START_STOP_RETRY)  # time.monotonic()
+        self._auto_warned = False
 
     @property
     def is_connected(self) -> bool:
@@ -351,20 +361,27 @@ class HcaloryBleClient:
         self._turn_on_target = max(MIN_TEMP, min(MAX_TEMP, target_temp or self._status.target_temp))
         _LOGGER.info("Turning heater ON (target %d°C)", self._turn_on_target)
 
-        try:
-            if not await self._power_on():
+        with self._command():
+            try:
+                ok = await self._turn_on_temperature()
+            finally:
+                self._turn_on_target = None
+        await self.sync_auto_start_stop()
+        return ok
+
+    async def _turn_on_temperature(self) -> bool:
+        """Power on, switch to temperature mode and send the turn-on target."""
+        if not await self._power_on():
+            return False
+        if not await self._switch_mode(MODE_TEMPERATURE):
+            return False
+        # Repeat if a new target arrived while the last one was being sent
+        while True:
+            target = self._turn_on_target
+            if not await self._apply_temperature_mode(target):
                 return False
-            if not await self._switch_mode(MODE_TEMPERATURE):
-                return False
-            # Repeat if a new target arrived while the last one was being sent
-            while True:
-                target = self._turn_on_target
-                if not await self._apply_temperature_mode(target):
-                    return False
-                if self._turn_on_target == target:
-                    return True
-        finally:
-            self._turn_on_target = None
+            if self._turn_on_target == target:
+                return True
 
     async def turn_on_gear(self) -> bool:
         """Turn the heater on in gear (fixed output level) mode.
@@ -372,9 +389,10 @@ class HcaloryBleClient:
         It runs at the gear level it was last set to.
         """
         _LOGGER.info("Turning heater ON in gear mode")
-        if not await self._power_on():
-            return False
-        return await self._switch_mode(MODE_GEAR)
+        with self._command():
+            ok = await self._power_on() and await self._switch_mode(MODE_GEAR)
+        await self.sync_auto_start_stop()
+        return ok
 
     async def _power_on(self) -> bool:
         """Power the heater on (if needed) and wait until it reports it is on."""
@@ -403,9 +421,21 @@ class HcaloryBleClient:
         return False
 
     async def turn_off(self) -> bool:
-        """Turn the heater off (it then runs its fan to cool down)."""
+        """Turn the heater off (it then runs its fan to cool down).
+
+        Waits until the heater reports it is no longer on, so the auto
+        start/stop check can't act on a stale "running" status. That check
+        runs again once the heater is in standby (power off also clears the
+        heater's auto start/stop, seen 15 Nov 2026).
+        """
         _LOGGER.info("Turning heater OFF")
-        return await self._send_command(action_command(ACTION_POWER_OFF))
+        with self._command():
+            if not await self._send_command(action_command(ACTION_POWER_OFF)):
+                return False
+            if not await self._wait_for(lambda: not self._status.is_on, CONFIRM_TIMEOUT):
+                _LOGGER.warning("Heater did not report that it turned off")
+                return False
+            return True
 
     async def set_temperature(self, temp: int) -> bool:
         """Set the target temperature in °C.
@@ -418,13 +448,94 @@ class HcaloryBleClient:
         target = max(MIN_TEMP, min(MAX_TEMP, temp))
         _LOGGER.info("Setting target temperature to %d°C", target)
         if self._turn_on_target is not None:
+            # The turn-on in progress sends it, then checks auto start/stop
             self._turn_on_target = target
             self._status.target_temp = target
             return True
         if not self._status.is_on:
             self._status.target_temp = target
-            return True
-        return await self._apply_temperature_mode(target)
+            ok = True
+        else:
+            with self._command():
+                ok = await self._apply_temperature_mode(target)
+        await self.sync_auto_start_stop()
+        return ok
+
+    @contextmanager
+    def _command(self):
+        """Mark a command as in progress, so the auto start/stop check waits."""
+        self._busy += 1
+        try:
+            yield
+        finally:
+            self._busy -= 1
+
+    def set_wanted_auto_start_stop(self, wanted: bool) -> None:
+        """Set the auto start/stop setting the heater should be kept at."""
+        if wanted != self._wanted_auto_start_stop:
+            _LOGGER.info("Auto start/stop wanted %s", "on" if wanted else "off")
+            self._auto_warned = False
+        self._wanted_auto_start_stop = wanted
+
+    async def sync_auto_start_stop(self) -> None:
+        """Put the heater's auto start/stop back to the wanted setting if it differs.
+
+        Runs on every status poll and after each command, so a change made at
+        the heater's panel or in the app is undone within seconds.
+
+        The heater ignores the auto start/stop toggle in standby (tested
+        15 Nov 2026), but power off clears auto start/stop in standby. So:
+        - running: send the toggle;
+        - standby, auto on but wanted off: send power off;
+        - standby, auto off but wanted on: nothing can set it; it is set the
+          next time the heater runs.
+        Never while starting or cooling down or while another command is in
+        progress, and at most once every AUTO_START_STOP_RETRY seconds (the
+        toggle must not be resent before the last one has had time to show).
+        """
+        status = self._status
+        wanted = self._wanted_auto_start_stop
+        if wanted is None or status.auto_start_stop is None:
+            return
+        if status.auto_start_stop == wanted:
+            self._auto_warned = False
+            return
+        if status.state == HeaterState.RUNNING:
+            command = action_command(ACTION_AUTO_START_STOP_TOGGLE)
+        elif status.state == HeaterState.OFF and not wanted:
+            command = action_command(ACTION_POWER_OFF)
+        else:
+            return
+        if (
+            self._busy
+            or self._turn_on_target is not None
+            or self._auto_lock.locked()
+            or not self.is_connected
+            or time.monotonic() - self._last_auto_toggle < AUTO_START_STOP_RETRY
+        ):
+            return
+
+        async with self._auto_lock:
+            _LOGGER.info(
+                "Heater auto start/stop is %s, setting it back to %s (%s)",
+                "on" if status.auto_start_stop else "off",
+                "on" if wanted else "off",
+                "toggle" if status.state == HeaterState.RUNNING else "power off",
+            )
+            self._last_auto_toggle = time.monotonic()
+            if not await self._send_command(command):
+                return
+            if await self._wait_for(lambda: status.auto_start_stop == wanted, CONFIRM_TIMEOUT):
+                self._auto_warned = False
+                return
+            if not self._auto_warned:
+                _LOGGER.warning(
+                    "Heater did not confirm auto start/stop %s (state %s); retrying every %d s",
+                    "on" if wanted else "off",
+                    status.state,
+                    AUTO_START_STOP_RETRY,
+                )
+                self._auto_warned = True
 
     async def _apply_temperature_mode(self, target: int) -> bool:
         """Make sure a running heater is in temperature mode at target °C."""
